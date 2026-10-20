@@ -1,0 +1,333 @@
+// CareerConnect — application controller (STEP 11, spec §28)
+// Endpoints here: submit (multipart), my-applications list, resume download.
+// Recruiter-side listing + status changes arrive in Step 19 (Applicants page).
+const fs = require('fs');
+const path = require('path');
+const Application = require('../models/Application');
+const Job = require('../models/Job');
+const { UPLOAD_DIR } = require('../middleware/uploadMiddleware');
+
+const COVER_MAX = 2000;
+const STATUS_QUERY = ['applied', 'reviewed', 'shortlisted', 'hired', 'rejected'];
+
+// Best-effort cleanup so a rejected apply attempt never leaves an orphan file.
+const removeQuiet = (p) => {
+  if (p) fs.promises.unlink(p).catch(() => {});
+};
+
+// @desc    Apply to an active job (multipart/form-data: resume + coverLetter?)
+// @route   POST /api/jobs/:id/applications   (job seeker only)
+const applyToJob = async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res
+        .status(400)
+        .json({ success: false, message: 'A resume file is required (PDF or Word, max 2 MB)' });
+    }
+
+    const coverLetter = String(req.body.coverLetter || '').trim();
+    if (coverLetter.length > COVER_MAX) {
+      removeQuiet(req.file.path);
+      return res
+        .status(400)
+        .json({ success: false, message: `Cover letter cannot exceed ${COVER_MAX} characters` });
+    }
+
+    const job = await Job.findById(req.params.id);
+    if (!job || job.status === 'draft') {
+      // 404 (not 403) — same anti-leak rule as the details page
+      removeQuiet(req.file.path);
+      return res.status(404).json({ success: false, message: 'Job not found' });
+    }
+    if (job.status === 'closed') {
+      removeQuiet(req.file.path);
+      return res
+        .status(400)
+        .json({ success: false, message: 'This job is no longer accepting applications' });
+    }
+    if (new Date(job.deadline) < new Date()) {
+      removeQuiet(req.file.path);
+      return res
+        .status(400)
+        .json({ success: false, message: 'The application deadline for this job has passed' });
+    }
+
+    try {
+      const application = await Application.create({
+        job: job._id,
+        applicant: req.user._id, // NEVER taken from the body — token is authority
+        coverLetter,
+        resume: {
+          filename: req.file.filename,
+          originalName: req.file.originalname,
+          mimeType: req.file.mimetype,
+          size: req.file.size,
+        },
+      });
+      return res.status(201).json({
+        success: true,
+        message: 'Application submitted successfully',
+        data: { application },
+      });
+    } catch (saveErr) {
+      if (saveErr.code === 11000) {
+        removeQuiet(req.file.path);
+        return res
+          .status(409)
+          .json({ success: false, message: 'You have already applied to this job' });
+      }
+      throw saveErr;
+    }
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Current job seeker's applications (newest first, optional status filter)
+// @route   GET /api/applications/my
+const getMyApplications = async (req, res, next) => {
+  try {
+    const filter = { applicant: req.user._id };
+    if (STATUS_QUERY.includes(req.query.status)) filter.status = req.query.status;
+
+    const applications = await Application.find(filter)
+      .sort({ createdAt: -1 })
+      // if the recruiter deleted the job later, `job` populates to null and
+      // the UI shows "job removed" (delete cascade cleanup is Step 15)
+      .populate('job', 'title company location jobType status deadline')
+      // hygiene (STEP 17): `resume.filename` is the server-generated DISK name —
+      // the client only ever needs originalName (labels) and the download route.
+      .select('-resume.filename');
+
+    res.status(200).json({
+      success: true,
+      message: 'Applications fetched successfully',
+      data: { applications, total: applications.length },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Download an applicant's resume file
+// @route   GET /api/applications/:id/resume
+// Permission: the applicant themselves, or the recruiter who posted the job.
+// No static /uploads mount exists — this route IS the only door.
+const downloadResume = async (req, res, next) => {
+  try {
+    const application = await Application.findById(req.params.id).populate({
+      path: 'job',
+      select: 'postedBy',
+    });
+    if (!application) {
+      return res.status(404).json({ success: false, message: 'Application not found' });
+    }
+
+    const uid = req.user._id.toString();
+    const isApplicant = application.applicant.toString() === uid;
+    const isJobOwner = application.job && application.job.postedBy.toString() === uid;
+    if (!isApplicant && !isJobOwner) {
+      return res.status(403).json({ success: false, message: 'You cannot view this resume' });
+    }
+
+    // Safe from traversal: `filename` was generated by Multer, never user input.
+    const filePath = path.join(UPLOAD_DIR, application.resume.filename);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ success: false, message: 'Resume file is missing on this server' });
+    }
+
+    const safeName = String(application.resume.originalName).replace(/["\r\n]/g, '');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+    return res.sendFile(filePath);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Recruiter dashboard summary: job counts, per-job application
+//          funnels (one aggregation, not one query per job), recent applicants
+// @route   GET /api/applications/recruiter/summary   (recruiter only)
+const getRecruiterSummary = async (req, res, next) => {
+  try {
+    const jobs = await Job.find({ postedBy: req.user._id })
+      .select('_id title status deadline')
+      .sort({ createdAt: -1 });
+    const jobIds = jobs.map((j) => j._id);
+
+    const [agg, recent, newThisWeek] = await Promise.all([
+      jobIds.length
+        ? Application.aggregate([
+            { $match: { job: { $in: jobIds } } },
+            { $group: { _id: { job: '$job', status: '$status' }, count: { $sum: 1 } } },
+          ])
+        : Promise.resolve([]),
+      jobIds.length
+        ? Application.find({ job: { $in: jobIds } })
+            .sort({ createdAt: -1 })
+            .limit(8)
+            .populate('applicant', 'name email')
+            .populate('job', 'title')
+        : Promise.resolve([]),
+      jobIds.length
+        ? Application.countDocuments({
+            job: { $in: jobIds },
+            createdAt: { $gte: new Date(Date.now() - 7 * 86400000) },
+          })
+        : Promise.resolve(0),
+    ]);
+
+    const perJobMap = new Map(
+      jobs.map((j) => [
+        j._id.toString(),
+        {
+          _id: j._id,
+          title: j.title,
+          status: j.status,
+          deadline: j.deadline,
+          closingSoon:
+            j.status === 'active' && new Date(j.deadline) - Date.now() <= 7 * 86400000,
+          counts: { applied: 0, reviewed: 0, shortlisted: 0, hired: 0, rejected: 0, total: 0 },
+        },
+      ])
+    );
+    const totals = { applied: 0, reviewed: 0, shortlisted: 0, hired: 0, rejected: 0, total: 0 };
+
+    for (const row of agg) {
+      const bucket = perJobMap.get(row._id.job.toString());
+      const status = row._id.status;
+      if (!bucket || !(status in bucket.counts)) continue;
+      bucket.counts[status] += row.count;
+      bucket.counts.total += row.count;
+      totals[status] += row.count;
+      totals.total += row.count;
+    }
+
+    const jobsSummary = { total: jobs.length, active: 0, draft: 0, closed: 0 };
+    jobs.forEach((j) => {
+      jobsSummary[j.status] += 1;
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Recruiter summary fetched successfully',
+      data: {
+        jobs: jobsSummary,
+        applications: { ...totals, newThisWeek },
+        perJob: Array.from(perJobMap.values()),
+        recent: recent.map((a) => ({
+          applicationId: a._id,
+          status: a.status,
+          createdAt: a.createdAt,
+          // resumes may exist for applicants who later deleted… null-safe:
+          applicant: a.applicant ? { name: a.applicant.name, email: a.applicant.email } : null,
+          job: a.job ? { _id: a.job._id, title: a.job.title } : null,
+        })),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    All applicants for one of MY jobs (recruiter pipeline)
+// @route   GET /api/applications/job/:jobId?status=   (recruiter only, Step 19)
+// The ownership filter lives INSIDE the job lookup: one query answers
+// "does this job exist and is it mine" — anyone else's job (or a draft)
+// 404s instead of leaking that it exists.
+const getJobApplicants = async (req, res, next) => {
+  try {
+    const job = await Job.findOne({ _id: req.params.jobId, postedBy: req.user._id }).select(
+      '_id title status deadline'
+    );
+    if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
+
+    const filter = { job: job._id };
+    if (STATUS_QUERY.includes(req.query.status)) filter.status = req.query.status;
+
+    const applications = await Application.find(filter)
+      .sort({ createdAt: -1 })
+      // give the recruiter enough context to shortlist without opening a tab per person
+      .populate(
+        'applicant',
+        'name email phone location professionalTitle about skills education experience'
+      )
+      // same hygiene as the seeker view: disk names never leave the server
+      .select('-resume.filename');
+
+    res.status(200).json({
+      success: true,
+      message: 'Applicants fetched successfully',
+      data: {
+        job,
+        applicants: applications,
+        total: applications.length,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Move one applicant through the pipeline (optionally with a note)
+// @route   PUT /api/applications/job/:jobId/:applicationId/status   (recruiter only)
+// The note replaces the previous one (latest word wins) and the applicant
+// sees both on their Applications page — no hidden status changes.
+const updateApplicationStatus = async (req, res, next) => {
+  try {
+    const { status, note } = req.body || {};
+
+    if (!STATUS_QUERY.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `status must be one of: ${STATUS_QUERY.join(', ')}`,
+      });
+    }
+    const cleanNote = String(note ?? '').trim();
+    if (cleanNote.length > 500) {
+      return res.status(400).json({ success: false, message: 'Note cannot exceed 500 characters' });
+    }
+
+    // Re-check ownership even though the URL came from our own UI (never trust the client).
+    const job = await Job.findOne({ _id: req.params.jobId, postedBy: req.user._id }).select('_id');
+    if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
+
+    const application = await Application.findOne({ _id: req.params.applicationId, job: job._id });
+    if (!application) {
+      return res.status(404).json({ success: false, message: 'Application not found' });
+    }
+
+    const firstTouch = status !== 'applied' && !application.reviewedAt;
+    application.status = status;
+    application.statusNote = cleanNote;
+    if (firstTouch) application.reviewedAt = new Date();
+    await application.save();
+
+    const populated = await application.populate('applicant', 'name email');
+    res.status(200).json({
+      success: true,
+      message: `Marked as ${status}${firstTouch ? ' · applicant notified on their dashboard' : ''}`,
+      data: {
+        application: {
+          _id: populated._id,
+          status: populated.status,
+          statusNote: populated.statusNote,
+          reviewedAt: populated.reviewedAt,
+          applicant: populated.applicant
+            ? { name: populated.applicant.name, email: populated.applicant.email }
+            : null,
+        },
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+module.exports = {
+  applyToJob,
+  getMyApplications,
+  downloadResume,
+  getRecruiterSummary,
+  getJobApplicants,
+  updateApplicationStatus,
+};

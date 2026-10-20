@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build output
+dist/
+build/
+*.local
+
+# Environment variables (never commit real secrets)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Uploads (user resumes/applications stored locally in dev)
+backend/uploads/*
+!backend/uploads/applications/
+backend/uploads/applications/*
+!backend/uploads/applications/.gitkeep
+!backend/uploads/resumes/
+backend/uploads/resumes/*
+!backend/uploads/resumes/.gitkeep
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
