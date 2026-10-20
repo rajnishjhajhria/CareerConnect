@@ -1,9 +1,8 @@
 # CareerConnect — Find opportunities. Build your career.
 
-> **Status: STEPS 1–21 complete.** Job seekers and recruiters both run end-to-end
-> against MongoDB — register → profile → search → save → apply → track, and
-> post → manage → review applicants → update pipeline. Step 22 is the final
-> verification pass.
+> **Status:** Core job-seeker and recruiter workflows are implemented. The
+> responsive UI has been reviewed on desktop and mobile; use the manual
+> checklist below for end-to-end validation against a fresh local database.
 
 A full-stack job portal: React + Vite + Bootstrap 5 on the front,
 Express + Mongoose + JWT on the back. No mock data anywhere — every screen
@@ -176,8 +175,15 @@ curl 'http://localhost:5000/api/jobs?search=react&sort=salary_high&limit=5'
 | `/recruiter/dashboard` | Recruiter | Funnel stats + recent applicants |
 | `/recruiter/jobs` | Recruiter | Manage postings (status flow, edit, delete) |
 | `/recruiter/jobs/create` · `.../:id/edit` | Recruiter | Full job form (draft or publish) |
-| `/recruiter/jobs/:jobId/applicants` | Recruiter | Pipeline: résumé download, cover letter, status + note updates |
+| `/recruiter/jobs/:jobId/applicants` | Recruiter | Review applicant contact details and skills, view profiles, download résumés, read cover letters, and update pipeline status with a note |
 | anything else | Public | 404 |
+
+## UI behavior
+
+- Recruiter dashboards summarize applications by job and pipeline stage, with a recent-applicants panel and direct review links.
+- Job management and applicant lists use compact cards on narrow screens and tables on wider screens, keeping actions available without page-level horizontal scrolling.
+- Apply and status dialogs keep their form content scrollable while the background page is locked. Dialog surfaces follow the current light or dark theme.
+- Recruiter status notes appear on the seeker's Applications page after the status is saved.
 
 ## Data models (one paragraph each)
 
@@ -216,7 +222,9 @@ CORS is left open (`app.use(cors())`) on purpose: in dev the browser only ever
 talks to the Vite proxy (same origin), and open CORS keeps `curl :5000` testing
 from any host painless. For a production deploy, restrict the origin there.
 
-## Manual test checklist (Step 22 will run this end-to-end)
+## Manual end-to-end checklist
+
+Run this checklist against a fresh local database before a release. These steps create or change data.
 
 1. **Seeker journey** — register fresh → profile to 100% + upload resume → search “React” → save a job → see ♥ state across pages → apply with resume + cover letter → tracker shows *applied*.
 2. **Recruiter journey** — log in as priya → dashboard funnel numbers match → open *Full Stack Developer* applicants → download a résumé → read cover letter → move Rita from “applied” to “reviewed” with a note.
