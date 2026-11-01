@@ -1,6 +1,10 @@
 // CareerConnect — MongoDB connection helper (STEP 2: final version)
 // Uses Mongoose. Reads the connection string from process.env.MONGO_URI,
 // so local MongoDB and MongoDB Atlas both work with zero code changes.
+const dns = require('dns');
+
+dns.setServers(['1.1.1.1', '8.8.8.8']);
+
 const mongoose = require('mongoose');
 
 // Tries to connect up to `retries` times, waiting `delayMs` between attempts.
