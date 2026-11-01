@@ -67,12 +67,6 @@ const Login = () => {
                   </div>
                 )}
                 <LoginForm />
-                <div className="alert alert-info small mt-3 mb-0">
-                  <i className="bi bi-info-circle me-1" aria-hidden="true"></i>
-                  <strong>Demo logins:</strong>{' '}
-                  job seeker <code>aarav@careerconnect.com</code> / <code>Demo@123</code>
-                  {'  ·  '}recruiter <code>priya@careerconnect.com</code> / <code>Demo@123</code>
-                </div>
               </div>
             </div>
           </div>
